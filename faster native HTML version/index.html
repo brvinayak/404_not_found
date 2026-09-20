@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GRID POINT -WAREHOUSE LOCATION OPTIMISATION</title>
+    
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Leaflet for Mapping -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <!-- PapaParse for CSV reading -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+    <style>
+        /* Dark / Brutalist UI Theme */
+        body { background-color: #000; color: #fff; font-family: monospace; }
+        .brutalist-border { border: 2px solid #fff; }
+        .brutalist-input { background: #000; color: #fff; border: 1px solid #fff; padding: 4px; outline: none; }
+        .brutalist-input:focus { border-color: #888; }
+        .brutalist-input::placeholder { color: #555; }
+        .brutalist-button { background: #fff; color: #000; text-transform: uppercase; font-weight: bold; cursor: pointer; transition: all 0.2s; }
+        .brutalist-button:hover { background: #000; color: #fff; }
+        .brutalist-button:disabled { background: #333; color: #777; cursor: not-allowed; border-color: #333; }
+        
+        /* Map Container Base */
+        #map { background: #e5e5e5; }
+        
+        /* Custom Leaflet overrides */
+        .leaflet-container { font-family: monospace; }
+        .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: #000; color: #fff; border: 2px solid #fff; border-radius: 0; }
+        
+        /* Custom CSS for attribution */
+        .leaflet-control-attribution { background: rgba(0, 0, 0, 0.8) !important; color: #fff !important; }
+        .leaflet-control-attribution a { color: #fff !important; text-decoration: underline; }
+    </style>
+</head>
+<body class="h-screen w-screen flex flex-col p-4 m-0 box-border">
+
+    <!-- Header / Title -->
+    <header class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 pb-4 border-b-2 border-white gap-4">
+        <div>
+            <h1 class="text-2xl font-bold tracking-widest uppercase">GRID POINT -WAREHOUSE LOCATION OPTIMISATION</h1>
+            <p class="text-sm mt-1">Capacitated Warehouse Optimizer (Global Reallocation Update)</p>
+        </div>
+        <div id="status" class="text-sm border border-white px-3 py-2 uppercase font-bold bg-black">Status: Awaiting CSV Data...</div>
+    </header>
+
+    <!-- Variable Control Panel, Optimize Action & Upload -->
+    <section class="flex flex-wrap items-end gap-4 mb-4 pb-4 border-b-2 border-white">
+        
+        <!-- Standard Constraints -->
+        <label class="flex flex-col text-xs uppercase tracking-wider">
+            Max Radius (m)
+            <input type="number" id="maxRadius" value="2000" class="mt-1 brutalist-input w-24 text-sm">
+        </label>
+        
+        <label class="flex flex-col text-xs uppercase tracking-wider">
+            Max Capacity
+            <input type="number" id="maxClusterSize" value="300" class="mt-1 brutalist-input w-24 text-sm">
+        </label>
+
+        <label class="flex flex-col text-xs uppercase tracking-wider">
+            Min Points
+            <input type="number" id="minPoints" value="10" class="mt-1 brutalist-input w-20 text-sm">
+        </label>
+
+        <label class="flex flex-col text-xs uppercase tracking-wider">
+            DBSCAN Eps (m)
+            <input type="number" id="dbscanEps" value="500" class="mt-1 brutalist-input w-24 text-sm">
+        </label>
+
+        <!-- Target Warehouses Override -->
+        <label class="flex flex-col text-xs uppercase tracking-wider text-yellow-400">
+            Target Warehouses (K)
+            <input type="number" id="targetK" placeholder="Auto" class="mt-1 brutalist-input w-36 text-sm border-yellow-400 text-yellow-400" title="Leave empty for auto-density discovery.">
+        </label>
+
+        <div class="ml-auto flex items-center gap-3">
+            <label class="brutalist-border px-5 py-2 brutalist-button inline-block text-center text-sm">
+                Upload CSV
+                <input type="file" id="csvFileInput" accept=".csv" class="hidden">
+            </label>
+
+            <button id="optimizeBtn" class="brutalist-border px-5 py-2 brutalist-button text-sm" disabled>
+                Optimize
+            </button>
+        </div>
+    </section>
+
+    <!-- Main Map Container -->
+    <main class="flex-grow brutalist-border relative z-0">
+        <div id="map" class="h-full w-full"></div>
+    </main>
+
+    <script>
+        const CLUSTER_COLOURS = [
+            "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+            "#911eb4", "#46f0f0", "#f032e6", "#bcf60c", "#fabebe",
+            "#008080", "#e6beff", "#9a6324", "#fffac8", "#800000",
+            "#aaffc3", "#808000", "#ffd8b1", "#000075", "#808080"
+        ];
+
+        const map = L.map('map').setView([20, 0], 2);
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        }).addTo(map);
+
+        let mapLayers = [];
+        let cachedCoordinates = []; 
+
+        function haversine(lat1, lon1, lat2, lon2) {
+            const R = 6371000; 
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLon/2) * Math.sin(dLon/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        }
+
+        const csvFileInput = document.getElementById('csvFileInput');
+        const optimizeBtn = document.getElementById('optimizeBtn');
+        const statusEl = document.getElementById('status');
+
+        csvFileInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            statusEl.innerText = 'STATUS: PARSING CSV...';
+            statusEl.classList.remove('text-yellow-400');
+
+            Papa.parse(file, {
+                header: true,
+                dynamicTyping: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    const validPoints = results.data.filter(d => d.Latitude && d.Longitude).map(d => ({
+                        lat: parseFloat(d.Latitude),
+                        lng: parseFloat(d.Longitude)
+                    }));
+
+                    if (validPoints.length === 0) {
+                        alert("Error: No valid 'Latitude' and 'Longitude' columns found in CSV.");
+                        statusEl.innerText = 'STATUS: ERROR READING DATA';
+                        return;
+                    }
+
+                    cachedCoordinates = validPoints;
+                    optimizeBtn.disabled = false;
+                    runOptimization(); 
+                }
+            });
+            this.value = '';
+        });
+
+        optimizeBtn.addEventListener('click', function() {
+            if (cachedCoordinates.length === 0) return;
+            runOptimization();
+        });
+
+        function runOptimization() {
+            const maxRadiusM = parseInt(document.getElementById('maxRadius').value, 10) || 2000;
+            const maxClusterSize = parseInt(document.getElementById('maxClusterSize').value, 10) || 300;
+            const minPoints = parseInt(document.getElementById('minPoints').value, 10) || 10;
+            const dbscanEps = parseInt(document.getElementById('dbscanEps').value, 10) || 500;
+            const targetK = parseInt(document.getElementById('targetK').value, 10);
+
+            mapLayers.forEach(layer => map.removeLayer(layer));
+            mapLayers = [];
+            
+            let results;
+            if (!isNaN(targetK) && targetK > 0) {
+                statusEl.innerText = `STATUS: RUNNING K-MEDIANS (K=${targetK})...`;
+                statusEl.classList.add('text-yellow-400');
+                results = calculateKMedians(cachedCoordinates, targetK, maxRadiusM, maxClusterSize, minPoints);
+            } else {
+                statusEl.innerText = 'STATUS: RUNNING AUTO DENSITY CLUSTERING...';
+                statusEl.classList.remove('text-yellow-400');
+                results = calculateDensityClustering(cachedCoordinates, maxRadiusM, maxClusterSize, minPoints, dbscanEps);
+            }
+
+            renderToMap(results.warehouses, results.noisePoints, maxClusterSize);
+        }
+
+        // --- ALGORITHM 1: AUTO DENSITY CLUSTERING (NOW WITH PHASE 2 FIX) ---
+        function calculateDensityClustering(data, maxRadius, maxCap, minPts, dbscanEps) {
+            let allPoints = data.map(p => ({ lat: p.lat, lng: p.lng }));
+            let unassigned = [...allPoints];
+            let candidateWarehouses = [];
+
+            // PHASE 1: Discover Optimal Locations (Sequential Generation)
+            while (unassigned.length > 0) {
+                const seed = unassigned[0];
+                let clusterPoints = [];
+                let remaining = [];
+
+                unassigned.forEach(p => {
+                    p.distanceToSeed = haversine(seed.lat, seed.lng, p.lat, p.lng);
+                });
+                unassigned.sort((a, b) => a.distanceToSeed - b.distanceToSeed); 
+
+                unassigned.forEach(p => {
+                    if (p.distanceToSeed <= maxRadius && clusterPoints.length < maxCap) {
+                        clusterPoints.push(p);
+                    } else {
+                        remaining.push(p);
+                    }
+                });
+
+                if (clusterPoints.length >= minPts) {
+                    const avgLat = clusterPoints.reduce((sum, p) => sum + p.lat, 0) / clusterPoints.length;
+                    const avgLng = clusterPoints.reduce((sum, p) => sum + p.lng, 0) / clusterPoints.length;
+                    candidateWarehouses.push({ lat: avgLat, lng: avgLng });
+                }
+                unassigned = remaining;
+            }
+
+            // PHASE 2: GLOBAL GREEDY REALLOCATION (Fixes the overlapping lines bug)
+            let allPairs = [];
+            allPoints.forEach((p, pIdx) => {
+                candidateWarehouses.forEach((w, wIdx) => {
+                    let d = haversine(p.lat, p.lng, w.lat, w.lng);
+                    if (d <= maxRadius) {
+                        allPairs.push({ pIdx, wIdx, d, p });
+                    }
+                });
+            });
+
+            // Sort purely by the absolute shortest distance map-wide
+            allPairs.sort((a, b) => a.d - b.d);
+
+            let pointAssigned = new Array(allPoints.length).fill(false);
+            let assignments = Array.from({length: candidateWarehouses.length}, () => []);
+
+            // Greedily lock points into their closest valid warehouse
+            allPairs.forEach(pair => {
+                if (!pointAssigned[pair.pIdx] && assignments[pair.wIdx].length < maxCap) {
+                    pointAssigned[pair.pIdx] = true;
+                    assignments[pair.wIdx].push(pair.p);
+                }
+            });
+
+            // Rebuild final JSON structures
+            let warehouses = [];
+            let noisePoints = [];
+
+            assignments.forEach((pts, idx) => {
+                if (pts.length >= 1) { 
+                    warehouses.push({
+                        lat: candidateWarehouses[idx].lat,
+                        lng: candidateWarehouses[idx].lng,
+                        points: pts
+                    });
+                }
+            });
+
+            allPoints.forEach((p, i) => {
+                if (!pointAssigned[i]) {
+                    noisePoints.push(p);
+                }
+            });
+
+            return { warehouses, noisePoints };
+        }
+
+        // --- ALGORITHM 2: K-MEANS++ INITIALIZATION & LLOYD'S LOOP ---
+        function calculateKMedians(data, targetK, maxRadius, maxCap, minPts) {
+            let points = data.map(p => ({ lat: p.lat, lng: p.lng }));
+            let k = Math.min(targetK, points.length);
+            
+            let centroids = [points[Math.floor(Math.random() * points.length)]];
+            while (centroids.length < k) {
+                let dists = points.map(p => {
+                    let minDist = Math.min(...centroids.map(c => haversine(p.lat, p.lng, c.lat, c.lng)));
+                    return minDist * minDist; 
+                });
+                let sum = dists.reduce((a, b) => a + b, 0);
+                let r = Math.random() * sum;
+                let cum = 0;
+                for (let i = 0; i < points.length; i++) {
+                    cum += dists[i];
+                    if (cum >= r) {
+                        centroids.push(points[i]);
+                        break;
+                    }
+                }
+            }
+
+            let finalWarehouses = [];
+            for (let iter = 0; iter < 15; iter++) {
+                let allPairs = [];
+                points.forEach((p, pIdx) => {
+                    centroids.forEach((c, cIdx) => {
+                        let d = haversine(p.lat, p.lng, c.lat, c.lng);
+                        if (d <= maxRadius) {
+                            allPairs.push({ p, pIdx, cIdx, d });
+                        }
+                    });
+                });
+
+                allPairs.sort((a, b) => a.d - b.d);
+
+                let pointAssigned = new Array(points.length).fill(false);
+                let assignments = Array.from({length: k}, () => []);
+
+                allPairs.forEach(pair => {
+                    if (!pointAssigned[pair.pIdx] && assignments[pair.cIdx].length < maxCap) {
+                        pointAssigned[pair.pIdx] = true;
+                        assignments[pair.cIdx].push(pair.p);
+                    }
+                });
+
+                let moved = false;
+                finalWarehouses = [];
+                
+                assignments.forEach((clusterPoints, cIdx) => {
+                    if (clusterPoints.length > 0) {
+                        let avgLat = clusterPoints.reduce((sum, p) => sum + p.lat, 0) / clusterPoints.length;
+                        let avgLng = clusterPoints.reduce((sum, p) => sum + p.lng, 0) / clusterPoints.length;
+                        
+                        if (haversine(centroids[cIdx].lat, centroids[cIdx].lng, avgLat, avgLng) > 0.5) moved = true;
+                        
+                        centroids[cIdx] = { lat: avgLat, lng: avgLng };
+                        finalWarehouses.push({ lat: avgLat, lng: avgLng, points: clusterPoints });
+                    }
+                });
+                if (!moved) break; 
+            }
+
+            let validWarehouses = [];
+            let noisePoints = [];
+            let assignedRefs = new Set();
+
+            finalWarehouses.forEach(w => {
+                if (w.points.length >= minPts) {
+                    validWarehouses.push(w);
+                    w.points.forEach(p => assignedRefs.add(`${p.lat},${p.lng}`));
+                } else {
+                    noisePoints.push(...w.points);
+                }
+            });
+
+            points.forEach(p => {
+                if (!assignedRefs.has(`${p.lat},${p.lng}`)) {
+                    noisePoints.push(p);
+                }
+            });
+
+            return { warehouses: validWarehouses, noisePoints };
+        }
+
+        function renderToMap(warehouses, noisePoints, maxClusterSize) {
+            let bounds = L.latLngBounds();
+
+            noisePoints.forEach(p => {
+                const noiseMarker = L.circleMarker([p.lat, p.lng], {
+                    radius: 2,
+                    color: '#000', 
+                    fillColor: '#ff0000',
+                    fillOpacity: 0.8,
+                    weight: 1
+                }).bindPopup("<b>NOISE / UNASSIGNED</b><br>Failed radius, capacity, or min_points constraint").addTo(map);
+                mapLayers.push(noiseMarker);
+                bounds.extend([p.lat, p.lng]);
+            });
+
+            warehouses.forEach((w, i) => {
+                const clusterColor = CLUSTER_COLOURS[(i * 7) % CLUSTER_COLOURS.length];
+
+                w.points.forEach(p => {
+                    const line = L.polyline([[w.lat, w.lng], [p.lat, p.lng]], {
+                        color: clusterColor,
+                        weight: 2, 
+                        opacity: 0.8,
+                        dashArray: '4'
+                    }).addTo(map);
+                    mapLayers.push(line);
+
+                    const houseMarker = L.circleMarker([p.lat, p.lng], {
+                        radius: 4,
+                        color: '#000',
+                        fillColor: clusterColor,
+                        fillOpacity: 1,
+                        weight: 1
+                    }).addTo(map);
+                    mapLayers.push(houseMarker);
+                    bounds.extend([p.lat, p.lng]);
+                });
+
+                const whIcon = L.divIcon({
+                    className: 'custom-div-icon',
+                    html: `<div style="background-color:${clusterColor}; color:#fff; font-size:10px; font-weight:bold; display:flex; align-items:center; justify-content:center; width:24px; height:24px; border:2px solid #000; box-shadow: 0px 0px 8px rgba(0,0,0,0.6); border-radius: 4px;">W${i+1}</div>`,
+                    iconSize: [24, 24],
+                    iconAnchor: [12, 12]
+                });
+
+                const whMarker = L.marker([w.lat, w.lng], { icon: whIcon })
+                    .bindPopup(`<b>WAREHOUSE ${i+1}</b><br>Capacity: ${w.points.length} / ${maxClusterSize}<br>Color Code: <span style="color:${clusterColor}">&#9632;</span>`)
+                    .addTo(map);
+                
+                mapLayers.push(whMarker);
+            });
+
+            if (warehouses.length > 0 || noisePoints.length > 0) {
+                map.fitBounds(bounds, { padding: [50, 50] });
+            }
+            
+            const stateText = document.getElementById('targetK').value ? "(K-OVERRIDE ENABLED)" : "(AUTO-DENSITY ENABLED)";
+            document.getElementById('status').innerText = `STATUS: ${warehouses.length} WAREHOUSES BUILT | ${noisePoints.length} NOISE ${stateText}`;
+        }
+    </script>
+</body>
+</html>
