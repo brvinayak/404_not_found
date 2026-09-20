@@ -36,13 +36,13 @@ You can adjust these parameters directly in the UI before clicking "Optimize":
 First applying clustering algorithm the database is split into a set of clusters, where in each cluster has the datapoints that are located feasibly nearby.
 Then inside each cluster, vectors are taken from the assumed initial warehouse position to each datapoint,
 now an Error function is formulated:
-**E = 1/2 ∑|Vi|^2
-**where Vi represents induvial vecots
-**then x,y of warehouse is updated based on
-**x = x - a * dE/dx
-**y = y - a * dE/dy
-**till convergence 
-**this leaving us with the optimal x,y for the warehouse in the given cluster
+E = 1/2 ∑|Vi|^2
+where Vi represents induvial vecots
+then x,y of warehouse is updated based on
+x = x - a * dE/dx
+y = y - a * dE/dy
+till convergence 
+this leaving us with the optimal x,y for the warehouse in the given cluster
 
 
 ---
